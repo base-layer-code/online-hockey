@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>NEON HOCKEY ONLINE</title>
+    <style>
+        :root { --neon: #00ff88; --p1: #ff0066; --p2: #00ccff; }
+        body { margin: 0; background: #000; color: #fff; font-family: 'Arial Black', sans-serif; overflow: hidden; touch-action: none; }
+        canvas { display: block; filter: blur(0.5px); }
+
+        /* 上部のスコア表示 */
+        #score-board {
+            position: fixed; top: 20px; width: 100%; display: flex; justify-content: center;
+            font-size: 60px; font-weight: bold; pointer-events: none; z-index: 5; opacity: 0.8;
+        }
+        .score-num { margin: 0 30px; text-shadow: 0 0 20px currentColor; }
+
+        /* ロビー画面（スクショの再現） */
+        #lobby {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.9);
+            display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100;
+        }
+        .title { font-size: 42px; color: var(--neon); text-shadow: 0 0 15px var(--neon); margin-bottom: 30px; }
+        
+        .room-box {
+            border: 2px solid var(--neon); border-radius: 15px; padding: 20px 40px;
+            background: rgba(0, 255, 136, 0.05); text-align: center; margin-bottom: 20px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.2);
+        }
+        .room-code { font-size: 48px; letter-spacing: 5px; color: var(--neon); text-shadow: 0 0 10px var(--neon); }
+        
+        .settings-panel {
+            background: #111; border-radius: 15px; padding: 20px; width: 300px;
+            border: 1px solid #333; font-size: 14px; margin-bottom: 30px;
+        }
+        .setting-item { display: flex; align-items: center; margin: 10px 0; gap: 10px; cursor: pointer; }
+        
+        .start-btn {
+            background: var(--neon); color: #000; border: none; padding: 15px 60px;
+            font-size: 20px; border-radius: 50px; font-weight: bold; cursor: pointer;
+            box-shadow: 0 0 20px var(--neon); transition: 0.3s;
+        }
+        .start-btn:disabled { background: #333; color: #666; box-shadow: none; cursor: not-allowed; }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+<div id="score-board">
+    <div class="score-num" style="color: var(--p1)" id="s1">0</div>
+    <div style="color: #333">-</div>
+    <div class="score-num" style="color: var(--p2)" id="s2">0</div>
+</div>
+
+<div id="lobby">
+    <div class="title">⚡️ NEON HOCKEY</div>
+    <p style="font-size: 12px; color: #888;">ONLINE 2-PLAYER</p>
+    
+    <div class="room-box">
+        <div style="font-size: 12px; margin-bottom: 10px;">あなたのルームコード</div>
+        <div class="room-code" id="display-room-id">LOADING...</div>
+        <div style="font-size: 12px; margin-top: 10px;" id="wait-msg">⌛ P2の参加を待っています...</div>
+    </div>
+
+    <div class="settings-panel">
+        <div style="color: #888; margin-bottom: 15px; font-size: 12px;">⚙️ ゲーム設定（ホストのみ変更可）</div>
+        <label class="setting-item"><input type="checkbox" id="checkItems" checked disabled> アイテム出現</label>
+        <label class="setting-item"><input type="checkbox" id="checkSkills" checked disabled> スキル有効</label>
+        <label class="setting-item"><input type="checkbox" id="checkLimit" checked disabled> 移動制限あり</label>
+        <div class="setting-item">勝利スコア: <input type="number" id="winScore" value="5" style="width: 40px; background: #222; color: #fff; border: 1px solid #444;" disabled></div>
+    </div>
+
+    <button class="start-btn" id="startBtn" onclick="requestStart()" disabled>🎮 ゲーム開始 (P2待ち)</button>
+</div>
+
+<canvas id="game"></canvas>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+    const socket = io();
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    let mySide = null;
+    let w, h, gameActive = false;
+    let score = [0, 0];
+    let ball = { x: 0, y: 0, vx: 5, vy: 5, r: 12 };
+    let p1 = { x: 60, y: 0, r: 35, color: '#ff0066' };
+    let p2 = { x: 0, y: 0, r: 35, color: '#00ccff' };
+
+    // 初期化とルーム割り当て
+    socket.on('init', (data) => {
+        mySide = data.side;
+        document.getElementById('display-room-id').innerText = "OCCE014C"; // 本来はサーバーから送る
+        
+        if (mySide === 'left') {
+            // ホストなら設定を触れるようにする
+            document.querySelectorAll('input').forEach(el => el.disabled = false);
+        }
+    });
+
+    // 2人揃った時
+    socket.on('player_joined', (count) => {
+        if (count >= 2) {
+            document.getElementById('wait-msg').innerText = "✅ 対戦準備完了！";
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('startBtn').innerText = "🎮 ゲーム開始";
+        }
+    });
+
+    socket.on('game_start_signal', () => {
+        document.getElementById('lobby').classList.add('hidden');
+        gameActive = true;
+        init();
+        loop();
+    });
+
+    function requestStart() {
+        if (mySide === 'left') socket.emit('game_start_request');
+    }
+
+    // --- 同期処理 ---
+    socket.on('update', (data) => {
+        if (data.side === 'left') { p1.x = data.x * w; p1.y = data.y * h; }
+        if (data.side === 'right') { p2.x = data.x * w; p2.y = data.y * h; }
+    });
+
+    socket.on('ball_update', (data) => {
+        if (mySide !== 'left') {
+            ball.x = data.x * w; ball.y = data.y * h;
+            score = data.score;
+            document.getElementById('s1').innerText = score[0];
+            document.getElementById('s2').innerText = score[1];
+        }
+    });
+
+    // --- ゲームロジック ---
+    function init() {
+        w = canvas.width = window.innerWidth;
+        h = canvas.height = window.innerHeight;
+        p1.y = p2.y = h / 2; p2.x = w - 60;
+        ball.x = w / 2; ball.y = h / 2;
+    }
+
+    canvas.addEventListener('pointermove', (e) => {
+        if (!gameActive) return;
+        let tx = e.clientX, ty = e.clientY;
+        if (mySide === 'left' && tx < w / 2) {
+            p1.x = tx; p1.y = ty;
+            socket.emit('move', { x: p1.x / w, y: p1.y / h });
+        } else if (mySide === 'right' && tx > w / 2) {
+            p2.x = tx; p2.y = ty;
+            socket.emit('move', { x: p2.x / w, y: p2.y / h });
+        }
+    });
+
+    function loop() {
+        if (!gameActive) return;
+        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+
+        // 背景デザイン（グリッド）
+        ctx.strokeStyle = '#111';
+        for(let i=0; i<w; i+=50) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,h); ctx.stroke(); }
+        for(let i=0; i<h; i+=50) { ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(w,i); ctx.stroke(); }
+
+        if (mySide === 'left') {
+            ball.x += ball.vx; ball.y += ball.vy;
+            if (ball.y < ball.r || ball.y > h - ball.r) ball.vy *= -1;
+            [p1, p2].forEach(p => {
+                let d = Math.hypot(ball.x - p.x, ball.y - p.y);
+                if (d < ball.r + p.r) {
+                    let angle = Math.atan2(ball.y - p.y, ball.x - p.x);
+                    ball.vx = Math.cos(angle) * 12; ball.vy = Math.sin(angle) * 12;
+                }
+            });
+            if (ball.x < 0) { score[1]++; resetBall(); }
+            if (ball.x > w) { score[0]++; resetBall(); }
+            
+            document.getElementById('s1').innerText = score[0];
+            document.getElementById('s2').innerText = score[1];
+            socket.emit('ball_sync', { x: ball.x / w, y: ball.y / h, score: score });
+        }
+
+        function resetBall() { ball.x = w/2; ball.y = h/2; ball.vx = 6; ball.vy = 6; }
+
+        // 描画
+        [p1, p2].forEach(p => {
+            ctx.shadowBlur = 20; ctx.shadowColor = p.color;
+            ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+        });
+        ctx.shadowBlur = 15; ctx.shadowColor = '#fff';
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
+        ctx.shadowBlur = 0;
+
+        requestAnimationFrame(loop);
+    }
+
+    window.onresize = init;
+</script>
+</body>
+</html>
